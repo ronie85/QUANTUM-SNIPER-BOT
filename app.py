@@ -1,53 +1,56 @@
-import streamlit as st
-import yfinance as yf
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from bot_brain import TradingBrain
+from hmmlearn import hmm
 
-st.set_page_config(page_title="Quantum Sniper Bot", layout="wide")
-st.title("🎯 Quantum Sniper: HMM + Volume Profile")
+class TradingBrain:
+    def __init__(self, n_states=3):
+        self.n_states = n_states
+        self.model = hmm.GaussianHMM(n_components=n_states, covariance_type="full", n_iter=1000)
 
-st.sidebar.header("Konfigurasi Bot")
-asset_type = st.sidebar.selectbox("Jenis Aset", ["Crypto", "Saham"])
-ticker = st.sidebar.text_input("Simbol", "BTC-USD" if asset_type == "Crypto" else "AAPL")
-timeframe = st.sidebar.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=1)
-period = "60d" if timeframe in ["15m", "1h"] else "2y"
+    def calculate_zscore(self, series, window=20):
+        s = series.squeeze()
+        return (s - s.rolling(window=window).mean()) / s.rolling(window=window).std()
 
-if st.sidebar.button("Jalankan Analisa & Backtest"):
-    try:
-        with st.spinner("Memproses data masa lalu..."):
-            df = yf.download(ticker, period=period, interval=timeframe)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            brain = TradingBrain()
-            poc_price, v_profile = brain.get_volume_profile(df)
-            df_processed, bull_state = brain.process_data(df)
-            
-            # Hitung Sinyal Sekarang
-            current_signal = brain.generate_signal(df_processed, poc_price)
-            
-            # Hitung Backtest
-            final_val, history = brain.perform_backtest(df_processed, poc_price)
-            roi = ((final_val - 1000) / 1000) * 100
+    def get_volume_profile(self, df, bins=30):
+        close_data = df['Close'].squeeze()
+        volume_data = df['Volume'].squeeze()
+        price_min, price_max = close_data.min(), close_data.max()
+        bins_edges = np.linspace(price_min, price_max, bins)
+        v_profile = df.groupby(pd.cut(close_data, bins=bins_edges))[volume_data.name].sum()
+        poc_price = v_profile.idxmax().mid
+        
+        # S&R berdasarkan High Volume Nodes (HVN)
+        sorted_v = v_profile.sort_values(ascending=False)
+        support = sorted_v.index[1].mid if len(sorted_v) > 1 else poc_price * 0.95
+        resistance = sorted_v.index[2].mid if len(sorted_v) > 2 else poc_price * 1.05
+        return poc_price, support, resistance
 
-            # Tampilan Metrik
-            c1, c2, c3 = st.columns(3)
-            c1.metric("SIGNAL SAAT INI", current_signal)
-            c2.metric("HASIL BACKTEST (Modal $1000)", f"${final_val:.2f}", f"{roi:.2f}% ROI")
-            c3.metric("POC PRICE", f"{poc_price:.2f}")
+    def calculate_pythagoras_slope(self, df, window=14):
+        side_a = window
+        price = df['Close'].squeeze()
+        side_b = ((price.iloc[-1] - price.iloc[-window]) / price.iloc[-window]) * 100
+        angle = np.degrees(np.arctan(side_b / side_a))
+        return angle
 
-            # Grafik
-            fig = go.Figure(data=[go.Candlestick(x=df_processed.index, open=df_processed['Open'], high=df_processed['High'], low=df_processed['Low'], close=df_processed['Close'])])
-            fig.add_hline(y=poc_price, line_dash="dash", line_color="gold", annotation_text="POC Level")
-            st.plotly_chart(fig, use_container_width=True)
+    def process_data(self, df):
+        close_s = df['Close'].squeeze()
+        df['Log_Ret'] = np.log(close_s / close_s.shift(1))
+        df['Vol_ZScore'] = self.calculate_zscore(df['Volume'])
+        df.dropna(inplace=True)
+        X = df[['Log_Ret']].values
+        self.model.fit(X)
+        df['State'] = self.model.predict(X)
+        bullish_state = np.argmax(self.model.means_)
+        df['Is_Bullish_Regime'] = (df['State'] == bullish_state)
+        return df
 
-            # Tabel Transaksi
-            if history:
-                st.subheader("📜 Riwayat Transaksi Masa Lalu")
-                st.table(pd.DataFrame(history))
-            else:
-                st.info("Tidak ada transaksi yang ditemukan dengan kriteria konfluens ini.")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
+    def get_trade_levels(self, df, poc_price, angle):
+        current_price = df['Close'].squeeze().iloc[-1]
+        # Entry di harga sekarang jika sinyal valid
+        entry = current_price
+        # Stop Loss di bawah POC atau 2% dari entry
+        stop_loss = min(poc_price, entry * 0.98)
+        # Take Profit berdasarkan risk/reward 1:3 atau sudut Pythagoras
+        tp_multiplier = 1 + (max(angle, 10) / 100)
+        take_profit = entry * tp_multiplier
+        return entry, stop_loss, take_profit
