@@ -5,3 +5,4 @@ hmmlearn
 streamlit
 plotly
 scipy
+streamlit-tradingview-chart-lite
