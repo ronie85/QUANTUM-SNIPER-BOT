@@ -3,6 +3,5 @@ pandas
 yfinance
 hmmlearn
 streamlit
-plotly
+streamlit-echarts
 scipy
-streamlit-tradingview-chart-lite
