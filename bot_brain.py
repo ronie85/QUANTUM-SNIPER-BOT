@@ -14,9 +14,7 @@ class TradingBrain:
     def get_volume_profile(self, df, bins=50):
         close_data = df['Close'].squeeze()
         volume_data = df['Volume'].squeeze()
-        price_min = close_data.min()
-        price_max = close_data.max()
-        bins_edges = np.linspace(price_min, price_max, bins)
+        bins_edges = np.linspace(close_data.min(), close_data.max(), bins)
         v_profile = df.groupby(pd.cut(close_data, bins=bins_edges), observed=False)[volume_data.name].sum()
         poc_price = v_profile.idxmax().mid
         return poc_price, v_profile
@@ -24,7 +22,11 @@ class TradingBrain:
     def process_data(self, df):
         close_data = df['Close'].squeeze()
         df['Log_Ret'] = np.log(close_data / close_data.shift(1))
+        
+        # Z-Score untuk Volume DAN Harga
         df['Vol_ZScore'] = self.calculate_zscore(df['Volume'])
+        df['Price_ZScore'] = self.calculate_zscore(df['Close'])
+        
         df.dropna(inplace=True)
         X = df[['Log_Ret']].values
         self.model.fit(X)
@@ -35,43 +37,47 @@ class TradingBrain:
 
     def generate_signal(self, df, poc_price):
         last_row = df.iloc[-1]
-        close_price = last_row['Close'].item() if hasattr(last_row['Close'], 'item') else last_row['Close']
-        condition_hmm = last_row['Is_Bullish_Regime']
-        condition_vol = last_row['Vol_ZScore'] > 1.0
-        condition_price = close_price >= poc_price
+        close_p = last_row['Close'].item() if hasattr(last_row['Close'], 'item') else last_row['Close']
         
-        if condition_hmm and condition_vol and condition_price:
+        # LOGIKA LEBIH PINTAR:
+        # 1. HMM Bullish
+        # 2. Volume Z-Score > 0.5 (Whale masuk)
+        # 3. Price Z-Score < 1.5 (Belum kemahalan/overbought)
+        # 4. Harga di atas POC
+        
+        if last_row['Is_Bullish_Regime'] and last_row['Vol_ZScore'] > 0.5 and \
+           last_row['Price_ZScore'] < 1.5 and close_p > poc_price:
             return "🚀 BUY"
-        elif not condition_hmm and close_price < poc_price:
+        elif close_p < (poc_price * 0.98) or not last_row['Is_Bullish_Regime']:
             return "⚠️ SELL"
         else:
             return "⌛ WAIT"
 
-    def perform_backtest(self, df, poc_price, initial_balance=1000):
-        balance = initial_balance
+    def perform_backtest(self, df, poc_price):
+        balance = 1000
         position = 0
+        entry_p = 0
         history = []
 
         for i in range(len(df)):
             row = df.iloc[i]
-            close_price = row['Close'].item() if hasattr(row['Close'], 'item') else row['Close']
+            curr_p = row['Close']
             
-            # Logika Konfluens
-            is_bullish = row['Is_Bullish_Regime']
-            vol_high = row['Vol_ZScore'] > 1.0
-            above_poc = close_price >= poc_price
-
-            # BUY Logic
-            if is_bullish and vol_high and above_poc and position == 0:
-                position = balance / close_price
+            # Entry
+            if row['Is_Bullish_Regime'] and row['Vol_ZScore'] > 0.5 and \
+               row['Price_ZScore'] < 1.5 and curr_p > poc_price and position == 0:
+                position = balance / curr_p
                 balance = 0
-                history.append({"Date": df.index[i], "Action": "BUY", "Price": f"{close_price:.2f}", "Balance": "Holding"})
-
-            # SELL Logic
-            elif (not is_bullish or close_price < poc_price) and position > 0:
-                balance = position * close_price
-                position = 0
-                history.append({"Date": df.index[i], "Action": "SELL", "Price": f"{close_price:.2f}", "Balance": f"{balance:.2f}"})
-
-        final_value = balance if position == 0 else position * df.iloc[-1]['Close'].item()
-        return final_value, history
+                entry_p = curr_p
+                history.append({"Date": df.index[i], "Action": "BUY", "Price": f"{curr_p:.2f}"})
+            
+            # Exit dengan Take Profit 2.5% atau Stop Loss 1.5%
+            elif position > 0:
+                profit_loss = (curr_p - entry_p) / entry_p
+                if profit_loss > 0.025 or profit_loss < -0.015 or not row['Is_Bullish_Regime']:
+                    balance = position * curr_p
+                    position = 0
+                    history.append({"Date": df.index[i], "Action": "SELL", "Price": f"{curr_p:.2f}", "P/L": f"{profit_loss*100:.2f}%"})
+                    
+        final_val = balance if position == 0 else position * df.iloc[-1]['Close']
+        return final_val, history
