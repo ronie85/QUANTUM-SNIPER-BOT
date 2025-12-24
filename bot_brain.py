@@ -5,17 +5,19 @@ from hmmlearn import hmm
 class TradingBrain:
     def __init__(self, n_states=3):
         self.n_states = n_states
-        self.model = hmm.GaussianHMM(n_components=n_states, covariance_type="full", n_iter=1000)
+        # Menggunakan covariance 'diag' untuk stabilitas pada data multi-feature
+        self.model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=2000)
 
     def calculate_zscore(self, series, window=20):
         s = series.squeeze()
-        return (s - s.rolling(window=window).mean()) / s.rolling(window=window).std()
+        return (s - s.rolling(window=window).mean()) / (s.rolling(window=window).std() + 1e-9)
 
-    def get_snr(self, df, window=20):
-        # Menghitung Support (Terendah) dan Resistance (Tertinggi) dalam periode tertentu
-        lows = df['Low'].rolling(window=window).min()
-        highs = df['High'].rolling(window=window).max()
-        return lows.iloc[-1], highs.iloc[-1]
+    def calculate_rsi(self, series, period=14):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / (loss + 1e-9)
+        return 100 - (100 / (1 + rs))
 
     def get_volume_profile(self, df, bins=50):
         close_data = df['Close'].squeeze()
@@ -26,40 +28,53 @@ class TradingBrain:
         return poc_price, v_profile
 
     def process_data(self, df):
-        close_data = df['Close'].squeeze()
-        df['Log_Ret'] = np.log(close_data / close_data.shift(1))
-        df['Vol_ZScore'] = self.calculate_zscore(df['Volume'])
-        df['Price_ZScore'] = self.calculate_zscore(df['Close'])
+        close_p = df['Close'].squeeze()
+        # Rumus Diperbarui: HMM sekarang melihat Perubahan Harga DAN Perubahan Volatilitas
+        df['Log_Ret'] = np.log(close_p / close_p.shift(1))
+        df['Vol_Change'] = np.log(df['Volume'] / df['Volume'].shift(1)).replace([np.inf, -np.inf], 0)
         
-        # Tambahkan S&R ke dataframe untuk backtest
-        df['Support'] = df['Low'].rolling(window=20).min()
-        df['Resistance'] = df['High'].rolling(window=20).max()
+        df['Vol_ZScore'] = self.calculate_zscore(df['Volume'])
+        df['RSI'] = self.calculate_rsi(close_p)
+        df['ATR'] = (df['High'] - df['Low']).rolling(window=14).mean() # Volatility feature
+        
+        # S&R Dinamis
+        df['Support'] = df['Low'].rolling(window=30).min()
+        df['Resistance'] = df['High'].rolling(window=30).max()
         
         df.dropna(inplace=True)
-        X = df[['Log_Ret']].values
+
+        # Matriks Input HMM: Menggabungkan Return dan Volatilitas
+        X = df[['Log_Ret', 'Vol_Change']].values
         self.model.fit(X)
+        
+        # Algoritma Viterbi: Decoding State yang paling mungkin
         df['State'] = self.model.predict(X)
-        bullish_state = np.argmax(self.model.means_)
+        
+        # Cari State Bullish (Mean Return tertinggi)
+        # Indeks 0 dari model.means_ adalah Log_Ret
+        bullish_state = np.argmax(self.model.means_[:, 0])
         df['Is_Bullish_Regime'] = (df['State'] == bullish_state)
+        
         return df, bullish_state
 
     def generate_signal(self, df, poc_price):
         last_row = df.iloc[-1]
-        close_p = last_row['Close'].item() if hasattr(last_row['Close'], 'item') else last_row['Close']
-        support = last_row['Support']
-        resistance = last_row['Resistance']
+        close_p = last_row['Close']
         
-        # LOGIKA S&R SNIPER:
-        # 1. HMM Harus Bullish
-        # 2. Harga harus dekat dengan Support atau POC (Beli di Lantai)
-        # 3. Z-Score Volume menunjukkan ada dorongan
+        # Sniper Strategy:
+        # 1. Viterbi State = Bullish
+        # 2. RSI di area 'Spring' (40-65), bukan Overbought
+        # 3. Harga di atas Support/POC dengan konfirmasi volume
         
-        is_near_support = close_p <= (support * 1.01) or close_p <= (poc_price * 1.01)
+        cond_hmm = last_row['Is_Bullish_Regime']
+        cond_rsi = 40 < last_row['RSI'] < 75
+        cond_price = close_p >= (last_row['Support'] * 0.995) # Harga kuat di support
+        cond_vol = last_row['Vol_ZScore'] > 0.5
         
-        if last_row['Is_Bullish_Regime'] and is_near_support and last_row['Vol_ZScore'] > 0.5:
-            return "🚀 BUY (At Support/POC)"
-        elif close_p >= (resistance * 0.99) or not last_row['Is_Bullish_Regime']:
-            return "⚠️ SELL (At Resistance/Trend Change)"
+        if cond_hmm and cond_rsi and cond_price and cond_vol:
+            return "🚀 BUY"
+        elif last_row['RSI'] > 85 or close_p < (poc_price * 0.97) or not cond_hmm:
+            return "⚠️ SELL"
         else:
             return "⌛ WAIT"
 
@@ -72,23 +87,26 @@ class TradingBrain:
         for i in range(len(df)):
             row = df.iloc[i]
             curr_p = row['Close']
-            supp = row['Support']
-            ress = row['Resistance']
             
-            # Entry: Bullish + Dekat Support/POC
-            if row['Is_Bullish_Regime'] and (curr_p <= supp * 1.01 or curr_p <= poc_price * 1.01) and position == 0:
+            # Entry Logic (Buy)
+            if row['Is_Bullish_Regime'] and 40 < row['RSI'] < 70 and \
+               curr_p >= row['Support'] and position == 0:
+                
                 position = balance / curr_p
                 balance = 0
                 entry_p = curr_p
                 history.append({"Date": df.index[i], "Action": "BUY", "Price": f"{curr_p:.2f}"})
-            
-            # Exit: Sentuh Resistance atau State berubah
+
+            # Exit Logic (Sell)
             elif position > 0:
-                profit_loss = (curr_p - entry_p) / entry_p
-                if curr_p >= ress * 0.99 or not row['Is_Bullish_Regime'] or profit_loss < -0.02:
+                p_l = (curr_p - entry_p) / entry_p
+                # Stop Loss Dinamis: 1.5x ATR di bawah Entry
+                stop_loss = entry_p - (1.5 * row['ATR'])
+                
+                if curr_p <= stop_loss or row['RSI'] > 85 or not row['Is_Bullish_Regime']:
                     balance = position * curr_p
                     position = 0
-                    history.append({"Date": df.index[i], "Action": "SELL", "Price": f"{curr_p:.2f}", "P/L": f"{profit_loss*100:.2f}%"})
+                    history.append({"Date": df.index[i], "Action": "SELL", "Price": f"{curr_p:.2f}", "P/L": f"{p_l*100:.2f}%"})
                     
         final_val = balance if position == 0 else position * df.iloc[-1]['Close']
         return final_val, history
