@@ -1,104 +1,70 @@
-import numpy as np
 import pandas as pd
-from hmmlearn import hmm
-import math
+import numpy as np
 
 class TradingBrain:
-    def __init__(self, n_states=3):
-        self.n_states = n_states
-        # Inisialisasi model AI HMM
-        self.model = hmm.GaussianHMM(n_components=n_states, covariance_type="full", n_iter=100)
-
-    def clean_data(self, df):
-        new_df = pd.DataFrame(index=df.index)
-        # Menangani data multi-index dari yfinance
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            if col in df.columns:
-                series = df[col].iloc[:, 0] if isinstance(df[col], pd.DataFrame) else df[col]
-                new_df[col.lower()] = series.values
-        return new_df.ffill().dropna()
-
+    def __init__(self):
+        self.len_sr = 30
+        
     def process_data(self, df):
-        df = self.clean_data(df)
-        if len(df) < 35: 
-            return pd.DataFrame()
-            
-        # Lapis 1: Log Returns untuk deteksi Rezim Pasar
-        df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
+        # Memastikan data tidak kosong
+        if df.empty: return df
         
-        # Lapis 2: Z-Score Volume (Filter Paus)
-        df['vol_zscore'] = (df['volume'] - df['volume'].rolling(30).mean()) / df['volume'].rolling(30).std()
+        # 1. DYNAMIC S&R (LOGIKA LANTAI & ATAP)
+        df['support_level'] = df['low'].rolling(window=self.len_sr).min()
+        df['resistance_level'] = df['high'].rolling(window=self.len_sr).max()
         
-        df = df.dropna()
-        if len(df) < 10: return pd.DataFrame()
+        # POC Wall (Garis Tengah Keseimbangan)
+        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
+        df['poc_wall'] = df['hlc3'].rolling(window=50).mean()
+
+        # 2. FILTER VOLUME (Z-SCORE)
+        v_ma = df['volume'].rolling(window=20).mean()
+        v_std = df['volume'].rolling(window=20).std()
+        df['v_zscore'] = (df['volume'] - v_ma) / v_std
         
-        X = df[['log_ret']].values
-        self.model.fit(X)
-        df['state'] = self.model.predict(X)
+        # 3. KALKULUS: PREDIKSI HARGA REAL-TIME
+        df['dy'] = df['close'].diff() # Kecepatan
+        df['d2y'] = df['dy'].diff()   # Percepatan
         
-        # Menentukan State Bullish & Bearish
-        means = self.model.means_.flatten()
-        bull_state = np.argmax(means)
-        bear_state = np.argmin(means)
+        # 4. LOGIKA ENTRY (ZERO LAG)
+        # Buy: Harga nyentuh lantai, percepatan balik positif, volume tinggi
+        df['is_high_vol'] = df['v_zscore'] > 1.2
+        df['buy_zone'] = df['low'] <= (df['support_level'] * 1.002)
+        df['is_reversing_up'] = (df['d2y'] > 0) & (df['dy'].shift(1) < 0)
         
-        df['is_bullish'] = (df['state'] == bull_state)
-        df['is_bearish'] = (df['state'] == bear_state)
+        # Sell: Harga nyentuh atap, percepatan turun, volume tinggi
+        df['sell_zone'] = df['high'] >= (df['resistance_level'] * 0.998)
+        df['is_reversing_down'] = df['d2y'] < 0
+        
         return df
 
-    def get_analysis(self, df, balance=1000):
-        close = df['close']
-        vol_z = df['vol_zscore'].iloc[-1]
+    def get_analysis(self, df):
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
         
-        # Lapis 3: Pythagoras Angle (Akselerasi Tren)
-        side_a = 14
-        side_b = ((close.iloc[-1] - close.iloc[-14]) / close.iloc[-14]) * 100
-        angle = math.degrees(math.atan(side_b / side_a))
+        signal = "NEUTRAL"
+        score = 0
         
-        # Lapis 4: POC Wall (S&R Statis)
-        bins = np.linspace(close.min(), close.max(), 20)
-        v_profile = df.groupby(pd.cut(close, bins=bins, include_lowest=True), observed=True)['volume'].sum()
-        poc = v_profile.idxmax().mid
-        
-        curr = close.iloc[-1]
-        
-        # Skor Strategi
-        score_long = 0
-        if df['is_bullish'].iloc[-1]: score_long += 40
-        if angle > 8: score_long += 35
-        if vol_z > 1.0: score_long += 25
-        
-        score_short = 0
-        if df['is_bearish'].iloc[-1]: score_short += 40
-        if angle < -8: score_short += 35
-        if vol_z > 1.0: score_short += 25
-
-        # Penentuan Sinyal
-        if score_long >= 85:
-            signal = "STRONG BUY"
-            final_score = score_long
-        elif score_short >= 85:
-            signal = "STRONG SELL"
-            final_score = score_short
+        # Penentuan Signal Berdasarkan Logika Zero Lag
+        if last['buy_zone'] and last['is_reversing_up'] and last['is_high_vol']:
+            signal = "STRONG BUY (ZERO LAG)"
+            score = 95
+        elif last['sell_zone'] and last['is_reversing_down'] and last['is_high_vol']:
+            signal = "STRONG SELL (ZERO LAG)"
+            score = 95
+        elif last['close'] > last['poc_wall']:
+            signal = "BULLISH (ABOVE POC)"
+            score = 60
         else:
-            signal = "WAIT / NEUTRAL"
-            final_score = max(score_long, score_short)
-        
-        # Risk Management (SL & TP)
-        dist = abs(curr - poc) / curr
-        if signal == "STRONG BUY":
-            sl = poc if poc < curr else curr * 0.97
-            tp = curr * (1 + (abs(angle)/20))
-        elif signal == "STRONG SELL":
-            sl = poc if poc > curr else curr * 1.03
-            tp = curr * (1 - (abs(angle)/20))
-        else:
-            sl, tp = curr * 0.97, curr * 1.03
+            signal = "BEARISH (BELOW POC)"
+            score = 40
             
-        # Leverage Safe Calculation
-        lev = math.floor(0.8 / dist) if dist > 0.005 else 5
-        lev = min(max(lev, 1), 20)
-
         return {
-            "curr": curr, "signal": signal, "score": int(final_score),
-            "sl": sl, "tp": tp, "lev": lev, "angle": angle, "poc": poc
+            "signal": signal,
+            "score": score,
+            "curr": last['close'],
+            "tp": last['close'] * 1.03, # Target 3%
+            "sl": last['support_level'] if last['close'] > last['poc_wall'] else last['close'] * 0.98,
+            "poc": last['poc_wall'],
+            "vol_z": last['v_zscore']
         }
