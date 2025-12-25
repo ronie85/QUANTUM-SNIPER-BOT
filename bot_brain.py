@@ -7,39 +7,45 @@ class TradingBrain:
         self.n_states = n_states
         self.model = hmm.GaussianHMM(n_components=n_states, covariance_type="full", n_iter=100)
 
-    def calculate_zscore(self, series, window=20):
-        if len(series) < window: return pd.Series(0, index=series.index)
-        return (series - series.rolling(window=window).mean()) / series.rolling(window=window).std()
-
-    def get_volume_profile(self, df, bins=20):
-        close = df['close'].ffill()
-        vol = df['volume'].ffill()
-        if close.min() == close.max(): return close.min(), close.min(), close.min()
-        bins_edges = np.linspace(close.min(), close.max(), bins)
-        v_profile = df.groupby(pd.cut(close, bins=bins_edges), observed=True)['volume'].sum()
-        poc = v_profile.idxmax().mid
-        return poc, poc * 0.98, poc * 1.02
-
-    def calculate_pythagoras_slope(self, df, window=10):
-        if len(df) < window: return 0
-        side_a = window
-        p = df['close']
-        side_b = ((p.iloc[-1] - p.iloc[-window]) / p.iloc[-window]) * 100
-        return np.degrees(np.arctan(side_b / side_a))
-
     def process_data(self, df):
+        # 1. Bersihkan Data
         df = df.copy()
         df.columns = df.columns.str.lower()
-        df = df[df['volume'] > 0]
+        df = df[df['volume'] > 0].ffill().dropna()
+        
+        # 2. Feature Engineering
         df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-        df['vol_zscore'] = self.calculate_zscore(df['volume'])
+        df['vol_zscore'] = (df['volume'] - df['volume'].rolling(20).mean()) / df['volume'].rolling(20).std()
         df = df.dropna()
-        X = df[['log_ret']].values
-        if len(X) > 10:
+        
+        # 3. HMM & Viterbi
+        if len(df) > 30:
+            X = df[['log_ret']].values
             self.model.fit(X)
             df['state'] = self.model.predict(X)
-            bull_st = np.argmax(self.model.means_)
-            df['is_bullish'] = (df['state'] == bull_st)
+            # Cari state dengan rata-rata kenaikan tertinggi (Bullish State)
+            bull_state = np.argmax(self.model.means_)
+            df['is_bullish'] = (df['state'] == bull_state)
         else:
             df['is_bullish'] = False
         return df
+
+    def get_levels(self, df, window=14):
+        # POC Sederhana (Volume Profile)
+        close = df['close']
+        vol = df['volume']
+        bins = np.linspace(close.min(), close.max(), 20)
+        v_profile = df.groupby(pd.cut(close, bins=bins), observed=True)['volume'].sum()
+        poc = v_profile.idxmax().mid
+        
+        # Pythagoras Slope (Kemiringan)
+        side_a = window
+        side_b = ((close.iloc[-1] - close.iloc[-window]) / close.iloc[-window]) * 100
+        angle = np.degrees(np.arctan(side_b / side_a))
+        
+        # Entry, SL, TP
+        curr = close.iloc[-1]
+        sl = min(poc, curr * 0.97)
+        tp = curr * (1 + abs(angle)/50) if angle > 0 else curr * 1.05
+        
+        return poc, angle, curr, sl, tp
