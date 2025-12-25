@@ -22,14 +22,13 @@ if menu == "🎯 Analisa Detail":
         if not df.empty:
             res = brain.get_analysis(df)
             
-            # --- SIDEBAR STATS & BERITA (FIXED) ---
+            # --- SIDEBAR STATS & BERITA ---
             st.sidebar.divider()
             st.sidebar.subheader("📊 Market Stats")
             st.sidebar.metric("Harga Live", f"{res['curr']:,.4f}")
             st.sidebar.metric("Volume", f"{res['vol_now']:,.0f}")
             
             st.sidebar.subheader("📰 Berita Terkini")
-            # Sistem Berita Anti-Error
             try:
                 t_obj = yf.Ticker(ticker)
                 all_news = t_obj.news
@@ -37,33 +36,29 @@ if menu == "🎯 Analisa Detail":
                     for n in all_news[:5]:
                         st.sidebar.markdown(f"🔹 **[{n['title']}]({n['link']})**")
                 else:
-                    # Link Cadangan jika API News YFinance Kosong
-                    st.sidebar.info("Gunakan Berita Eksternal:")
-                    news_link = f"https://www.google.com/search?q={ticker}+news&tbm=nws"
-                    st.sidebar.markdown(f"🔗 [Klik Berita Google News {ticker}]({news_link})")
+                    st.sidebar.info("Cari berita manual:")
+                    news_link = f"https://www.google.com/search?q={ticker}+news"
+                    st.sidebar.markdown(f"🔗 [Google News {ticker}]({news_link})")
             except:
                 st.sidebar.write("News sedang maintenance.")
 
             # --- PANEL UTAMA ---
             st.title(f"Quantum Dashboard: {ticker}")
             
-            # Sinyal Box
             if "BUY" in res['signal']:
                 st.success(f"### 📢 SINYAL: {res['signal']} (Skor: {res['score']})")
             else:
                 st.warning(f"### 📢 SINYAL: {res['signal']} (Skor: {res['score']})")
 
-            # Metrik Utama
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("ENTRY", f"{res['curr']:,.4f}")
             c2.metric("TAKE PROFIT", f"{res['tp']:,.4f}")
             c3.metric("STOP LOSS", f"{res['sl']:,.4f}")
             c4.metric("VOL Z-SCORE", f"{res['zscore']:.2f}")
 
-            # Pythagoras & S&R
             st.info(f"🧱 POC Wall (S&R): {res['poc']:,.4f} | 📐 Sudut Pythagoras: {res['angle']:.2f}°")
 
-            # TRADINGVIEW (UKURAN BESAR & STABIL)
+            # --- TRADINGVIEW ---
             st.subheader("📈 Live Chart (TradingView)")
             tv_symbol = ticker.replace("-", "") if "-" in ticker else ticker.replace(".JK", "")
             exchange = "IDX" if ".JK" in ticker else "BINANCE"
