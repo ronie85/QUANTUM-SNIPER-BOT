@@ -5,4 +5,3 @@ hmmlearn
 streamlit
 plotly
 scipy
-python-binance
