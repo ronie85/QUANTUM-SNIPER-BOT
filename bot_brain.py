@@ -8,18 +8,20 @@ class TradingBrain:
     def process_data(self, df):
         if df.empty: return df
         
-        # 1. PAKSA DATA JADI FLAT (MENGATASI ERROR MULTI-INDEX)
+        # PERBAIKAN KRUSIAL: Menghapus Multi-index agar kolom terbaca
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         
-        # S&R Logika Zero Lag
+        # Standarisasi Nama Kolom
+        df.columns = [str(c).capitalize() for c in df.columns]
+
+        # Rumus S&R (Support & Resistance) Dasar
         df['Support'] = df['Low'].rolling(window=self.len_sr).min()
         df['Resistance'] = df['High'].rolling(window=self.len_sr).max()
         
-        # Volume & Momentum
-        df['V_Z'] = (df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()
-        df['Dy'] = df['Close'].diff()
-        df['D2y'] = df['Dy'].diff()
+        # Indikator Momentum Dasar
+        df['SMA_Fast'] = df['Close'].rolling(10).mean()
+        df['SMA_Slow'] = df['Close'].rolling(30).mean()
         
         return df
 
@@ -27,20 +29,17 @@ class TradingBrain:
         if df.empty or len(df) < 30: return None
         
         last = df.iloc[-1]
-        prev = df.iloc[-2]
         
-        # Logika Zero Lag: Masuk di Lantai
-        buy_cond = (last['Low'] <= last['Support'] * 1.002) and (last['D2y'] > 0)
-        sell_cond = (last['High'] >= last['Resistance'] * 0.998) and (last['D2y'] < 0)
-        
-        res = "WAITING"
-        if buy_cond: res = "🟢 BUY AT SUPPORT"
-        elif sell_cond: res = "🔴 SELL AT RESISTANCE"
+        # Logika Sinyal Sederhana (Sebelum diubah-ubah)
+        signal = "WAITING"
+        if last['Close'] > last['SMA_Fast'] and last['Close'] > last['Support']:
+            signal = "🟢 BULLISH"
+        elif last['Close'] < last['SMA_Fast'] and last['Close'] < last['Resistance']:
+            signal = "🔴 BEARISH"
             
         return {
-            "signal": res,
+            "signal": signal,
             "price": float(last['Close']),
             "support": float(last['Support']),
-            "resistance": float(last['Resistance']),
-            "vz": float(last['V_Z'])
+            "resistance": float(last['Resistance'])
         }
