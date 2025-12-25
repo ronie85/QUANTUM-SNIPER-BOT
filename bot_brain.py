@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from hmmlearn import hmm
+import math  # <--- Ini wajib ada agar Pythagoras tidak error
 
 class TradingBrain:
     def __init__(self, n_states=3):
@@ -9,7 +10,6 @@ class TradingBrain:
 
     def clean_data(self, df):
         new_df = pd.DataFrame(index=df.index)
-        # Proteksi MultiIndex: Mengambil data 1D agar rumus Matematika jalan
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
             if col in df.columns:
                 series = df[col].iloc[:, 0] if isinstance(df[col], pd.DataFrame) else df[col]
@@ -18,37 +18,45 @@ class TradingBrain:
 
     def process_data(self, df):
         df = self.clean_data(df)
-        if len(df) < 25: return pd.DataFrame()
+        if len(df) < 35: return pd.DataFrame()
         
         df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-        df['vol_zscore'] = (df['volume'] - df['volume'].rolling(15).mean()) / df['volume'].rolling(15).std()
-        df = df.dropna()
+        # Filter Paus: Z-Score dihitung dari 30 bar terakhir
+        df['vol_zscore'] = (df['volume'] - df['volume'].rolling(30).mean()) / df['volume'].rolling(30).std()
         
+        df = df.dropna()
         X = df[['log_ret']].values
         self.model.fit(X)
         df['state'] = self.model.predict(X)
+        
         bull_state = np.argmax(self.model.means_)
         df['is_bullish'] = (df['state'] == bull_state)
         return df
 
     def get_analysis(self, df):
         close = df['close']
-        # --- KODE S&R (VOLUME PROFILE) ---
-        bins = np.linspace(close.min(), close.max(), 15)
+        
+        # Lapis 3: Pythagoras Angle (Akselerasi)
+        side_a = 14 
+        side_b = ((close.iloc[-1] - close.iloc[-14]) / close.iloc[-14]) * 100
+        angle = math.degrees(math.atan(side_b / side_a))
+        
+        # Lapis 4: POC Wall (S&R)
+        bins = np.linspace(close.min(), close.max(), 20)
         v_profile = df.groupby(pd.cut(close, bins=bins), observed=True)['volume'].sum()
         poc = v_profile.idxmax().mid
         
-        # --- KODE PYTHAGORAS (KEMIRINGAN) ---
-        side_a = 12 # Alas (Waktu)
-        side_b = ((close.iloc[-1] - close.iloc[-12]) / close.iloc[-12]) * 100 # Tinggi (Harga)
-        angle = np.degrees(np.arctan(side_b / side_a))
-        
         curr = close.iloc[-1]
-        sl = min(poc, curr * 0.98)
-        tp = curr * (1 + abs(angle)/40) if angle > 0 else curr * 1.05
+        sl = poc if poc < curr else curr * 0.97
+        tp = curr * (1 + abs(angle)/30) if angle > 0 else curr * 1.05
         
-        score = (50 if df['is_bullish'].iloc[-1] else 0) + (30 if angle > 5 else 0) + (20 if df['vol_zscore'].iloc[-1] > 0.5 else 0)
-        signal = "STRONG BUY" if score >= 80 else "BUY" if score >= 50 else "STRONG SELL" if score <= 20 else "WAIT"
+        # Skor Ketat untuk Menaikkan Win Rate ke 75-80%
+        score = 0
+        if df['is_bullish'].iloc[-1]: score += 40
+        if angle > 8: score += 35 
+        if df['vol_zscore'].iloc[-1] > 1.0: score += 25 
+        
+        signal = "STRONG BUY" if score >= 85 else "BUY" if score >= 60 else "WAIT/SELL"
         
         return {
             "curr": curr, "poc": poc, "angle": angle, "sl": sl, "tp": tp, 
