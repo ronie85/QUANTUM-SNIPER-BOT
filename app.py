@@ -1,49 +1,45 @@
 import streamlit as st
 import yfinance as yf
 from bot_brain import TradingBrain
-import pandas as pd
 
-st.set_page_config(page_title="Quantum Sniper PRO+", layout="wide")
+st.set_page_config(page_title="Quantum Sniper Fix", layout="wide")
 brain = TradingBrain()
 
-st.sidebar.title("🚀 Quantum Master")
-ticker = st.sidebar.text_input("Simbol (Contoh: XRP-USD)", "XRP-USD")
-tf = st.sidebar.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=1)
+st.title("🚀 Quantum Sniper Dashboard")
 
-if st.sidebar.button("JALANKAN ANALISA"):
+# Input di sidebar
+symbol = st.sidebar.text_input("Simbol Aset", "XRP-USD")
+interval = st.sidebar.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=1)
+
+if st.sidebar.button("ANALISA SEKARANG"):
     try:
-        # 1. Download Data
-        data = yf.download(ticker, period="60d", interval=tf)
+        # Tarik data dengan penanganan khusus
+        df_raw = yf.download(symbol, period="60d", interval=interval)
         
-        if data.empty:
-            st.error("Gagal mengambil data. Pastikan simbol benar.")
-        else:
-            # 2. Proses Data
-            df = brain.process_data(data)
-            res = brain.get_analysis(df)
+        if not df_raw.empty:
+            df = brain.process_data(df_raw)
+            result = brain.get_analysis(df)
             
-            if res:
-                # 3. Tampilkan UI
-                st.header(f"Hasil Analisa: {ticker}")
-                
-                m1, m2, m3 = st.columns(3)
-                m1.metric("SINYAL", res['signal'])
-                m2.metric("AKURASI", f"{res['score']}%")
-                m3.metric("Z-SCORE VOL", round(res['vol_z'], 2))
-                
-                st.subheader("Detail Eksekusi")
+            if result:
+                # Tampilkan angka besar
                 c1, c2, c3 = st.columns(3)
-                c1.info(f"Entry: {res['curr']:.4f}")
-                c2.success(f"Target: {res['tp']:.4f}")
-                c3.error(f"Stop Loss: {res['sl']:.4f}")
+                c1.metric("SINYAL", result['signal'])
+                c2.metric("HARGA", f"{result['price']:.4f}")
+                c3.metric("VOL Z-SCORE", f"{result['vz']:.2f}")
                 
-                # Tampilkan Tabel Data untuk memastikan data masuk
-                st.write("Preview Data Terakhir:")
-                st.dataframe(df.tail(5))
+                st.divider()
+                
+                # Tampilkan area S&R
+                st.write(f"**Lantai (Support):** {result['support']:.4f}")
+                st.write(f"**Atap (Resistance):** {result['resistance']:.4f}")
+                
+                # Tampilkan tabel untuk bukti data masuk
+                st.subheader("Data Market Terakhir")
+                st.dataframe(df.tail(10))
             else:
-                st.warning("Data tidak cukup untuk menghitung S&R. Coba timeframe lain.")
-                
+                st.error("Data masuk tapi gagal diproses. Coba simbol lain.")
+        else:
+            st.error("Gagal menarik data dari Yahoo Finance.")
+            
     except Exception as e:
-        st.error(f"Error Terdeteksi: {str(e)}")
-else:
-    st.info("Silakan klik 'Jalankan Analisa' untuk memulai.")
+        st.error(f"Sistem Error: {str(e)}")
