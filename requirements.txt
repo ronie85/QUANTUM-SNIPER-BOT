@@ -5,3 +5,4 @@ hmmlearn
 streamlit
 plotly
 scipy
+library
