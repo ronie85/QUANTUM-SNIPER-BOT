@@ -6,65 +6,62 @@ class TradingBrain:
         self.len_sr = 30
         
     def process_data(self, df):
-        # Memastikan data tidak kosong
-        if df.empty: return df
+        if df is None or len(df) < 50: 
+            return pd.DataFrame()
         
-        # 1. DYNAMIC S&R (LOGIKA LANTAI & ATAP)
-        df['support_level'] = df['low'].rolling(window=self.len_sr).min()
-        df['resistance_level'] = df['high'].rolling(window=self.len_sr).max()
+        # FIX: Menghilangkan Multi-Index dari yfinance terbaru
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         
-        # POC Wall (Garis Tengah Keseimbangan)
-        df['hlc3'] = (df['high'] + df['low'] + df['close']) / 3
-        df['poc_wall'] = df['hlc3'].rolling(window=50).mean()
+        # Memastikan nama kolom standar
+        df.columns = [c.capitalize() for c in df.columns]
 
-        # 2. FILTER VOLUME (Z-SCORE)
-        v_ma = df['volume'].rolling(window=20).mean()
-        v_std = df['volume'].rolling(window=20).std()
-        df['v_zscore'] = (df['volume'] - v_ma) / v_std
+        # 1. DYNAMIC S&R (Support & Resistance)
+        df['Support_level'] = df['Low'].rolling(window=self.len_sr).min()
+        df['Resistance_level'] = df['High'].rolling(window=self.len_sr).max()
         
-        # 3. KALKULUS: PREDIKSI HARGA REAL-TIME
-        df['dy'] = df['close'].diff() # Kecepatan
-        df['d2y'] = df['dy'].diff()   # Percepatan
+        # 2. VOLUME Z-SCORE
+        v_ma = df['Volume'].rolling(window=20).mean()
+        v_std = df['Volume'].rolling(window=20).std()
+        df['V_zscore'] = (df['Volume'] - v_ma) / v_std
         
-        # 4. LOGIKA ENTRY (ZERO LAG)
-        # Buy: Harga nyentuh lantai, percepatan balik positif, volume tinggi
-        df['is_high_vol'] = df['v_zscore'] > 1.2
-        df['buy_zone'] = df['low'] <= (df['support_level'] * 1.002)
-        df['is_reversing_up'] = (df['d2y'] > 0) & (df['dy'].shift(1) < 0)
+        # 3. KALKULUS (Kecepatan & Percepatan)
+        df['Dy'] = df['Close'].diff()
+        df['D2y'] = df['Dy'].diff()
         
-        # Sell: Harga nyentuh atap, percepatan turun, volume tinggi
-        df['sell_zone'] = df['high'] >= (df['resistance_level'] * 0.998)
-        df['is_reversing_down'] = df['d2y'] < 0
+        # 4. POC WALL (Garis Tengah)
+        df['Poc_wall'] = ((df['High'] + df['Low'] + df['Close']) / 3).rolling(window=50).mean()
         
         return df
 
     def get_analysis(self, df):
+        if df.empty or 'Support_level' not in df.columns:
+            return None
+            
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        signal = "NEUTRAL"
-        score = 0
+        # Logika Zero Lag
+        is_high_vol = float(last['V_zscore']) > 1.2
+        buy_zone = float(last['Low']) <= (float(last['Support_level']) * 1.002)
+        is_reversing_up = (float(last['D2y']) > 0) and (float(prev['Dy']) < 0)
         
-        # Penentuan Signal Berdasarkan Logika Zero Lag
-        if last['buy_zone'] and last['is_reversing_up'] and last['is_high_vol']:
-            signal = "STRONG BUY (ZERO LAG)"
+        signal = "WAITING"
+        score = 50
+        
+        if buy_zone and is_reversing_up and is_high_vol:
+            signal = "🟢 STRONG BUY"
             score = 95
-        elif last['sell_zone'] and last['is_reversing_down'] and last['is_high_vol']:
-            signal = "STRONG SELL (ZERO LAG)"
+        elif float(last['High']) >= (float(last['Resistance_level']) * 0.998) and float(last['D2y']) < 0:
+            signal = "🔴 STRONG SELL"
             score = 95
-        elif last['close'] > last['poc_wall']:
-            signal = "BULLISH (ABOVE POC)"
-            score = 60
-        else:
-            signal = "BEARISH (BELOW POC)"
-            score = 40
             
         return {
             "signal": signal,
             "score": score,
-            "curr": last['close'],
-            "tp": last['close'] * 1.03, # Target 3%
-            "sl": last['support_level'] if last['close'] > last['poc_wall'] else last['close'] * 0.98,
-            "poc": last['poc_wall'],
-            "vol_z": last['v_zscore']
+            "curr": float(last['Close']),
+            "tp": float(last['Close'] * 1.03),
+            "sl": float(last['Support_level']),
+            "poc": float(last['Poc_wall']),
+            "vol_z": float(last['V_zscore'])
         }
