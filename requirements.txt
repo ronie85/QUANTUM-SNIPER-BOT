@@ -3,5 +3,5 @@ pandas
 yfinance
 hmmlearn
 streamlit
-streamlit-echarts
+plotly
 scipy
