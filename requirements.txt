@@ -1,7 +1,5 @@
-numpy
-pandas
-yfinance
-hmmlearn
 streamlit
-plotly
-scipy
+yfinance
+pandas
+numpy
+hmmlearn
